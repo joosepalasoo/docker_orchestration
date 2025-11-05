@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  api:
+    volumes:
+
+      - ./api:/app
+      - /app/node_modules
+    environment:
+      NODE_ENV: development
+    command: sh -c "npm install && node server.js"
+
+  frontend:
+    volumes:
+
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    environment:
+      NODE_ENV: development

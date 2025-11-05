@@ -10,12 +10,9 @@ services:
       POSTGRES_USER: todouser
       POSTGRES_PASSWORD: mypassword
     volumes:
-      # Andmed püsivad siin
       - postgres_data:/var/lib/postgresql/data
-      # Init skript
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
-
       - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U todouser -d tododb"]
@@ -24,6 +21,24 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+
+  # Redis cache
+  redis:
+    image: redis:7-alpine
+    container_name: todo_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    command: redis-server --appendonly yes
 
   # Node.js API
   api:
@@ -36,17 +51,23 @@ services:
     depends_on:
       database:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
-
       - backend
       - frontend
     restart: unless-stopped
-    # Logid stdout'i
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # React Frontend
   frontend:
@@ -55,39 +76,38 @@ services:
       dockerfile: Dockerfile
     container_name: todo_frontend
     networks:
-
       - frontend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
     container_name: todo_nginx
     ports:
-      # OLULINE: See port on kust pääsed ligi
       - "80:80"
     volumes:
-
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-
       - api
       - frontend
     networks:
-
       - frontend
       - backend
     restart: unless-stopped
 
 networks:
-  # Backend võrk - andmebaas ja API
   backend:
     driver: bridge
-  # Frontend võrk - API, frontend, nginx
   frontend:
     driver: bridge
 
 volumes:
-  # PostgreSQL andmed
   postgres_data:
+    driver: local
+  redis_data:
     driver: local

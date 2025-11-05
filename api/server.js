@@ -1,9 +1,11 @@
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const redis = require('redis');
 
 const app = express();
 const PORT = 3000;
+const CACHE_TTL = 60; // 60 seconds
 
 // Middleware
 app.use(cors());
@@ -12,7 +14,6 @@ app.use(express.json());
 console.log('Starting API server...');
 
 // PostgreSQL connection
-// OLULINE: host='database' on Docker Compose DNS nimi
 const pool = new Pool({
   host: 'database',
   port: 5432,
@@ -24,22 +25,36 @@ const pool = new Pool({
   connectionTimeoutMillis: 2000
 });
 
+// Redis connection
+let redisClient;
+(async () => {
+  redisClient = redis.createClient({
+    socket: {
+      host: 'redis',
+      port: 6379
+    }
+  });
+
+  redisClient.on('error', (err) => console.error('Redis Client Error', err));
+  redisClient.on('connect', () => console.log('Connected to Redis'));
+
+  await redisClient.connect();
+})();
+
 pool.on('connect', () => {
   console.log('Connected to PostgreSQL');
-});
-
-pool.on('error', (err) => {
-  console.error('PostgreSQL error:', err);
 });
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
   try {
-    const result = await pool.query('SELECT NOW()');
+    const dbResult = await pool.query('SELECT NOW()');
+    const redisResult = await redisClient.ping();
     res.json({ 
       status: 'OK', 
       database: 'connected',
-      timestamp: result.rows[0].now 
+      redis: redisResult === 'PONG' ? 'connected' : 'disconnected',
+      timestamp: dbResult.rows[0].now 
     });
   } catch (err) {
     console.error('Health check failed:', err);
@@ -50,13 +65,25 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// GET all todos
+// GET all todos - WITH CACHE
 app.get('/api/todos', async (req, res) => {
   console.log('GET /api/todos');
   try {
+    // Check cache first
+    const cachedTodos = await redisClient.get('todos:all');
+    if (cachedTodos) {
+      console.log('Cache HIT');
+      return res.json(JSON.parse(cachedTodos));
+    }
+
+    console.log('Cache MISS - fetching from DB');
     const result = await pool.query(
       'SELECT * FROM todos ORDER BY created_at DESC'
     );
+    
+    // Store in cache
+    await redisClient.setEx('todos:all', CACHE_TTL, JSON.stringify(result.rows));
+    
     console.log(`Found ${result.rows.length} todos`);
     res.json(result.rows);
   } catch (err) {
@@ -87,7 +114,7 @@ app.get('/api/todos/:id', async (req, res) => {
   }
 });
 
-// POST new todo
+// POST new todo - INVALIDATE CACHE
 app.post('/api/todos', async (req, res) => {
   const { title, description } = req.body;
   console.log('POST /api/todos', { title, description });
@@ -101,6 +128,11 @@ app.post('/api/todos', async (req, res) => {
       'INSERT INTO todos (title, description) VALUES ($1, $2) RETURNING *',
       [title.trim(), description || null]
     );
+    
+    // Invalidate cache
+    await redisClient.del('todos:all');
+    console.log('Cache invalidated');
+    
     console.log('Created todo:', result.rows[0].id);
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -109,7 +141,7 @@ app.post('/api/todos', async (req, res) => {
   }
 });
 
-// PUT update todo
+// PUT update todo - INVALIDATE CACHE
 app.put('/api/todos/:id', async (req, res) => {
   const { id } = req.params;
   const { title, description, completed } = req.body;
@@ -129,6 +161,9 @@ app.put('/api/todos/:id', async (req, res) => {
       return res.status(404).json({ error: 'Todo not found' });
     }
 
+    // Invalidate cache
+    await redisClient.del('todos:all');
+
     console.log('Updated todo:', id);
     res.json(result.rows[0]);
   } catch (err) {
@@ -137,7 +172,7 @@ app.put('/api/todos/:id', async (req, res) => {
   }
 });
 
-// DELETE todo
+// DELETE todo - INVALIDATE CACHE
 app.delete('/api/todos/:id', async (req, res) => {
   const { id } = req.params;
   console.log(`DELETE /api/todos/${id}`);
@@ -151,6 +186,9 @@ app.delete('/api/todos/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Todo not found' });
     }
+
+    // Invalidate cache
+    await redisClient.del('todos:all');
 
     console.log('Deleted todo:', id);
     res.status(204).send();
